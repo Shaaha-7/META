@@ -1,0 +1,8 @@
+meta-wearables-dat-android/
+**/build/
+**/.gradle/
+**/.kotlin/
+**/.idea/
+**/local.properties
+.claude/
+*.apk

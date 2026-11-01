@@ -1,0 +1,219 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Ustad 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #070c18; font-family: sans-serif; touch-action: none; }
+  canvas { display: block; }
+  #labels { position: absolute; inset: 0; pointer-events: none; }
+  .lbl { position: absolute; transform: translate(-50%, -100%); white-space: nowrap; font-size: 12px; color: #39e6ff;
+         background: rgba(7,12,24,.78); border: 1px solid rgba(57,230,255,.5); padding: 3px 7px; border-radius: 6px;
+         opacity: 0; transition: opacity .5s; }
+  .lbl.fault { color: #fff; background: #ff3b30; border-color: #ff3b30; font-weight: 700; font-size: 13px; }
+  .show .lbl { opacity: 1; }
+  #hint { position: absolute; left: 10px; bottom: 8px; color: #8aa0c0; font-size: 11px; }
+  #btn { position: absolute; right: 10px; bottom: 8px; background: #39e6ff; color: #001018; border: 0; border-radius: 8px;
+         padding: 7px 12px; font-weight: 700; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="labels"></div>
+<div id="hint">Drag to rotate · pinch to zoom</div>
+<button id="btn">Assemble</button>
+<script src="three.min.js"></script>
+<script>
+// ---------- scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x070c18);
+scene.fog = new THREE.Fog(0x070c18, 24, 44);
+const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
+
+scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x1a2333, 1.2));
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(5, 8, 9); scene.add(key);
+const rim = new THREE.DirectionalLight(0x39e6ff, 1.2); rim.position.set(-8, 3, -6); scene.add(rim);
+
+const grid = new THREE.GridHelper(30, 30, 0x1d3b66, 0x10213d); grid.position.y = -4.2; scene.add(grid);
+
+const root = new THREE.Group(); scene.add(root);
+
+// ---------- materials ----------
+const mat = (color, o = {}) => new THREE.MeshStandardMaterial({ color, roughness: .45, metalness: .1, ...o });
+function canvasTex(draw, w = 512, h = 128) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h; draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
+}
+const finTex = canvasTex((g, w, h) => { g.fillStyle = '#b8c3cc'; g.fillRect(0, 0, w, h);
+  g.strokeStyle = '#7d8a96'; g.lineWidth = 2; for (let x = 0; x < w; x += 5) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); } });
+const meshTex = canvasTex((g, w, h) => { g.fillStyle = 'rgba(225,232,236,.95)'; g.fillRect(0, 0, w, h);
+  g.strokeStyle = '#9aa7b1'; g.lineWidth = 1; for (let x = 0; x < w; x += 8) { g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
+  for (let y = 0; y < h; y += 8) { g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); } });
+const coverTex = canvasTex((g, w, h) => { const gr = g.createLinearGradient(0, 0, 0, h); gr.addColorStop(0, '#ffffff'); gr.addColorStop(1, '#dfe4e9');
+  g.fillStyle = gr; g.fillRect(0, 0, w, h); g.fillStyle = '#9aa4ae'; g.font = 'bold 18px sans-serif'; g.textAlign = 'center'; g.fillText('I N V E R T E R', w / 2, h * .62);
+  g.fillStyle = '#34d399'; g.beginPath(); g.arc(w * .92, h * .78, 4, 0, 7); g.fill(); });
+
+// ---------- parts (ids match MachineLibrary.acParts) ----------
+const parts = {};
+function part(id, name, obj, explode, anchor = [0, 0, 0]) {
+  const g = new THREE.Group(); g.add(obj); g.userData = { id, name, home: new THREE.Vector3(), out: new THREE.Vector3(...explode), anchor: new THREE.Vector3(...anchor) };
+  g.traverse(m => { if (m.isMesh) { m.material = m.material.clone(); m.userData.baseOpacity = m.material.opacity; m.userData.baseEmissive = m.material.emissive.clone(); } });
+  root.add(g); parts[id] = g; return g;
+}
+const box = (w, h, d, m) => new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+const W = 8, H = 2.6, D = 2.2;
+
+// back chassis (static)
+const chassis = new THREE.Group();
+chassis.add(box(W, H, .12, mat(0xaeb6be)).translateZ(-D / 2));
+chassis.add(box(.12, H, D, mat(0xbcc3ca)).translateX(-W / 2));
+chassis.add(box(.12, H, D, mat(0xbcc3ca)).translateX(W / 2));
+chassis.add(box(W, .12, D, mat(0xbcc3ca)).translateY(H / 2));
+root.add(chassis);
+
+// evaporator coil + copper hairpins
+{ const g = new THREE.Group();
+  g.add(box(W - .6, 1.3, .35, mat(0xffffff, { map: finTex, metalness: .5, roughness: .35 })));
+  const cu = mat(0xc77b3b, { metalness: .8, roughness: .3 });
+  for (const s of [-1, 1]) for (let i = 0; i < 4; i++) { const t = new THREE.Mesh(new THREE.TorusGeometry(.12, .035, 8, 16, Math.PI), cu);
+    t.rotation.y = s * Math.PI / 2; t.position.set(s * (W - .6) / 2, -.45 + i * .3, 0); g.add(t); }
+  g.position.set(0, .35, -.2);
+  part('p-coil', 'Evaporator coil', g, [0, 1.2, .7], [0, .8, 0]); }
+
+// cross-flow blower fan
+{ const g = new THREE.Group(); const blade = mat(0x3b4652, { roughness: .6 });
+  g.add(new THREE.Mesh(new THREE.CylinderGeometry(.08, .08, W - 1, 12), mat(0x222a33)).rotateZ(Math.PI / 2));
+  for (let i = 0; i < 24; i++) { const b = box(W - 1.1, .04, .2, blade); const a = i / 24 * Math.PI * 2;
+    b.position.set(0, Math.cos(a) * .32, Math.sin(a) * .32); b.rotation.x = a + .5; g.add(b); }
+  for (let k = -3; k <= 3; k++) g.add(new THREE.Mesh(new THREE.CylinderGeometry(.42, .42, .03, 24), blade).rotateZ(Math.PI / 2).translateY(k * 1.15));
+  g.position.set(0, -.55, .1); g.userData.spin = true;
+  part('p-fan', 'Blower fan', g, [0, -1.0, 1.0], [-2.5, .5, 0]); }
+
+// drain pan with water
+{ const g = new THREE.Group(); const m = mat(0x8a96a3);
+  g.add(box(W - .4, .06, .9, m)); g.add(box(W - .4, .25, .06, m).translateZ(.45).translateY(.12));
+  g.add(box(W - .4, .25, .06, m).translateZ(-.45).translateY(.12));
+  const water = box(W - .5, .12, .82, mat(0x3aa0ff, { transparent: true, opacity: .75, metalness: .2, roughness: .1 })); water.position.y = .1; water.name = 'water'; g.add(water);
+  g.position.set(0, -.25, .25);
+  part('p-pan', 'Drain pan', g, [0, -2.1, .8], [-2.5, .3, .4]); }
+
+// drain hose with clog
+{ const curve = new THREE.CatmullRomCurve3([new THREE.Vector3(3.6, -.25, .5), new THREE.Vector3(4.6, -.4, .5), new THREE.Vector3(5, -1.2, .4), new THREE.Vector3(5.1, -3.2, .2)]);
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 48, .13, 12), mat(0xd6dbe0, { transparent: true, opacity: .55 })));
+  const clog = new THREE.Mesh(new THREE.SphereGeometry(.12, 16, 12), mat(0x5b4a2e, { roughness: .9 })); clog.position.copy(curve.getPoint(.45)); g.add(clog);
+  part('p-pipe', 'Drain line', g, [1.6, -2.1, .8], [5, -1.2, .4]); }
+
+// air filter
+{ const g = box(W - .5, 1.6, .05, mat(0xffffff, { map: meshTex, transparent: true, opacity: .9 })); g.position.set(0, .45, .25);
+  part('p-filter', 'Air filter', g, [0, 2.3, 1.4], [-2.5, .9, 0]); }
+
+// control board
+{ const g = new THREE.Group(); g.add(box(.6, .9, .06, mat(0x0f6b45)));
+  for (const [x, y] of [[-.12, .2], [.14, -.05], [-.1, -.25]]) g.add(box(.18, .16, .08, mat(0x1b1f24)).translateX(x).translateY(y).translateZ(.05));
+  g.position.set(3.5, .5, .3);
+  part('p-pcb', 'Control board', g, [2.8, .7, .8], [0, .5, 0]); }
+
+// front cover
+{ const g = new THREE.Group();
+  g.add(box(W, H - .4, .12, mat(0xffffff, { map: coverTex, roughness: .3 })));
+  g.add(box(W, .12, D * .5, mat(0xf2f4f6)).translateY((H - .4) / 2).translateZ(-.5));
+  g.position.set(0, .2, D / 2);
+  part('p-cover', 'Front cover', g, [0, 3.6, 2.0], [2.5, 1.1, 0]); }
+
+// louver
+{ const g = box(W - .6, .05, .45, mat(0xe6eaee)); g.rotation.x = -.5; g.position.set(0, -1.15, D / 2 - .05);
+  part('p-louver', 'Louver', g, [0, -3.1, 1.4], [2.5, 0, 0]); }
+
+// water drips (shown when the leak path is the fault)
+const drops = [];
+for (let i = 0; i < 6; i++) { const d = new THREE.Mesh(new THREE.SphereGeometry(.07, 10, 8), mat(0x6fc0ff, { transparent: true, opacity: .9 }));
+  d.userData.t = i / 6; d.visible = false; scene.add(d); drops.push(d); }
+
+// ---------- labels ----------
+const labelsEl = document.getElementById('labels');
+for (const id in parts) { const el = document.createElement('div'); el.className = 'lbl'; el.textContent = parts[id].userData.name; labelsEl.appendChild(el); parts[id].userData.el = el; }
+
+// ---------- state + API (called from Android) ----------
+let faults = [], exploded = false, explodeT = 0;
+function highlight(ids) {
+  faults = ids || [];
+  for (const id in parts) {
+    const p = parts[id], hit = faults.includes(id);
+    p.userData.el.classList.toggle('fault', hit);
+    if (hit) p.userData.el.textContent = '⚠ ' + p.userData.name;
+    else p.userData.el.textContent = p.userData.name;
+    p.traverse(m => { if (!m.isMesh) return;
+      m.material.transparent = true;
+      m.material.opacity = faults.length && !hit ? .28 : m.userData.baseOpacity;
+      m.material.depthWrite = !(faults.length && !hit);
+      m.material.needsUpdate = true;
+    });
+  }
+  drops.forEach(d => d.visible = faults.includes('p-pan') || faults.includes('p-pipe'));
+}
+function explode(on) { exploded = on; document.body.classList.toggle('show', on); document.getElementById('btn').textContent = on ? 'Assemble' : 'Explode'; }
+document.getElementById('btn').onclick = () => explode(!exploded);
+window.highlight = highlight; window.explode = explode;
+
+// ---------- camera orbit (drag / pinch) ----------
+let yaw = -.55, pitch = .28, dist = 21, autoSpin = true, last = null, pinch = null;
+addEventListener('pointerdown', e => { last = [e.clientX, e.clientY]; autoSpin = false; });
+addEventListener('pointerup', () => last = null);
+addEventListener('pointermove', e => { if (!last || pinch) return; yaw -= (e.clientX - last[0]) * .008; pitch = Math.max(-.2, Math.min(1.1, pitch + (e.clientY - last[1]) * .006)); last = [e.clientX, e.clientY]; });
+addEventListener('touchmove', e => { if (e.touches.length !== 2) { pinch = null; return; } const [a, b] = e.touches;
+  const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); if (pinch) dist = Math.max(9, Math.min(30, dist * pinch / d)); pinch = d; }, { passive: true });
+addEventListener('touchend', () => pinch = null);
+addEventListener('wheel', e => dist = Math.max(9, Math.min(30, dist + e.deltaY * .01)));
+
+function resize() { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize();
+
+// ---------- loop ----------
+const clock = new THREE.Clock(), tmp = new THREE.Vector3();
+const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+function frame() {
+  const dt = Math.min(clock.getDelta(), .05), time = clock.elapsedTime;
+  explodeT = Math.max(0, Math.min(1, explodeT + (exploded ? dt : -dt) / 1.4));
+  const e = ease(explodeT);
+  if (autoSpin) yaw += dt * .18;
+  camera.position.set(Math.sin(yaw) * Math.cos(pitch) * dist, Math.sin(pitch) * dist, Math.cos(yaw) * Math.cos(pitch) * dist);
+  camera.lookAt(0, -.3, 0);
+
+  const pulse = .5 + .5 * Math.sin(time * 5);
+  for (const id in parts) {
+    const p = parts[id];
+    p.position.copy(p.userData.home).addScaledVector(p.userData.out, e);
+    const hit = faults.includes(id);
+    p.traverse(m => { if (!m.isMesh) return;
+      if (hit) { m.material.emissive.setRGB(1, .12, .08); m.material.emissiveIntensity = .35 + pulse * .9 * e; }
+      else { m.material.emissive.copy(m.userData.baseEmissive); m.material.emissiveIntensity = 1; }
+    });
+    if (p.children[0]?.userData.spin) p.children[0].rotation.x += dt * (hit ? 1 : 6);
+    // label position
+    tmp.copy(p.userData.anchor).add(p.position).add(p.children[0].position).project(camera);
+    const el = p.userData.el; el.style.left = (tmp.x * .5 + .5) * innerWidth + 'px'; el.style.top = (-tmp.y * .5 + .5) * innerHeight + 'px';
+  }
+  // drips fall from the pan corner toward the floor
+  const pan = parts['p-pan'];
+  drops.forEach(d => { if (!d.visible) return; d.userData.t = (d.userData.t + dt * .7) % 1;
+    d.position.set(3.4 + pan.position.x, pan.position.y - .3 - d.userData.t * 3.4, .7 + pan.position.z); d.material.opacity = 1 - d.userData.t; });
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+frame();
+
+// standalone preview: ?parts=p-pan,p-pipe
+const q = new URLSearchParams(location.search);
+highlight((q.get('parts') || '').split(',').filter(Boolean));
+setTimeout(() => explode(true), 700);
+</script>
+</body>
+</html>

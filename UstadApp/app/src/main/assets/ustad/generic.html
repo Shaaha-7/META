@@ -1,0 +1,119 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Ustad 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #070c18; font-family: sans-serif; touch-action: none; }
+  canvas { display: block; }
+  #labels { position: absolute; inset: 0; pointer-events: none; }
+  .lbl { position: absolute; transform: translate(-50%, -100%); white-space: nowrap; font-size: 12px; color: #39e6ff;
+         background: rgba(7,12,24,.78); border: 1px solid rgba(57,230,255,.5); padding: 3px 7px; border-radius: 6px; opacity: 0; transition: opacity .5s; }
+  .lbl.fault { color: #fff; background: #ff3b30; border-color: #ff3b30; font-weight: 700; font-size: 13px; }
+  .show .lbl { opacity: 1; }
+  #hint { position: absolute; left: 10px; bottom: 8px; color: #8aa0c0; font-size: 11px; }
+  #btn { position: absolute; right: 10px; bottom: 8px; background: #39e6ff; color: #001018; border: 0; border-radius: 8px; padding: 7px 12px; font-weight: 700; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="labels"></div>
+<div id="hint">AI-generated layout · drag to rotate · pinch to zoom</div>
+<button id="btn">Assemble</button>
+<script src="three.min.js"></script>
+<script>
+// Generic exploded view: draws any machine from the AI's internal_parts layout.
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x070c18); scene.fog = new THREE.Fog(0x070c18, 24, 46);
+const camera = new THREE.PerspectiveCamera(38, 1, .1, 100);
+scene.add(new THREE.HemisphereLight(0xcfe8ff, 0x1a2333, 1.2));
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(5, 8, 9); scene.add(key);
+const rim = new THREE.DirectionalLight(0x39e6ff, 1.2); rim.position.set(-8, 3, -6); scene.add(rim);
+const grid = new THREE.GridHelper(30, 30, 0x1d3b66, 0x10213d); grid.position.y = -4.5; scene.add(grid);
+const root = new THREE.Group(); scene.add(root);
+
+let parts = {}, faults = [], exploded = false, explodeT = 0;
+const labelsEl = document.getElementById('labels');
+const clamp = (v, a, b) => Math.max(a, Math.min(b, Number(v) || a));
+
+function geometry(shape, [w, h, d]) {
+  switch (shape) {
+    case 'cylinder': return new THREE.CylinderGeometry(Math.max(w, d) / 2, Math.max(w, d) / 2, h, 32);
+    case 'sphere': return new THREE.SphereGeometry(Math.max(w, h, d) / 2, 32, 20);
+    case 'tube': return new THREE.TorusGeometry(Math.max(w, h) / 2, Math.max(.06, d / 4), 12, 40);
+    default: return new THREE.BoxGeometry(w, h, d);
+  }
+}
+
+function build(list) {
+  root.clear(); labelsEl.innerHTML = ''; parts = {};
+  if (!Array.isArray(list) || !list.length) return;
+  // Group by layer (front 3 … back -3); parts sharing a layer sit side by side.
+  const byLayer = {};
+  list.slice(0, 12).forEach(p => { const l = Math.round(clamp(p.layer, -3, 3)); (byLayer[l] = byLayer[l] || []).push(p); });
+  Object.entries(byLayer).forEach(([layer, items]) => {
+    const total = items.reduce((s, p) => s + clamp((p.size || [])[0], .2, 4) + .3, 0);
+    let x = -total / 2;
+    items.forEach(p => {
+      const size = [0, 1, 2].map(i => clamp((p.size || [])[i], .2, 4));
+      const color = /^#[0-9a-f]{6}$/i.test(p.color || '') ? p.color : '#8a96a3';
+      const mesh = new THREE.Mesh(geometry(p.shape, size), new THREE.MeshStandardMaterial({ color, roughness: .45, metalness: .25, transparent: true }));
+      const g = new THREE.Group(); g.add(mesh);
+      const cx = x + size[0] / 2; x += size[0] + .3;
+      g.userData = { id: p.id, name: p.name || p.id,
+        home: new THREE.Vector3(cx * .35, 0, layer * .45),            // packed together
+        out: new THREE.Vector3(cx * .8, layer * .8, layer * 1.1),       // spread like layers
+        top: size[1] / 2 + .25 };
+      const el = document.createElement('div'); el.className = 'lbl'; el.textContent = g.userData.name; labelsEl.appendChild(el); g.userData.el = el;
+      root.add(g); parts[p.id] = g;
+    });
+  });
+  highlight(faults);
+}
+
+function highlight(ids) {
+  faults = ids || [];
+  for (const id in parts) {
+    const p = parts[id], hit = faults.includes(id), m = p.children[0].material;
+    p.userData.el.classList.toggle('fault', hit);
+    p.userData.el.textContent = (hit ? '⚠ ' : '') + p.userData.name;
+    m.opacity = faults.length && !hit ? .3 : 1; m.depthWrite = !(faults.length && !hit); m.needsUpdate = true;
+  }
+}
+function explode(on) { exploded = on; document.body.classList.toggle('show', on); document.getElementById('btn').textContent = on ? 'Assemble' : 'Explode'; }
+document.getElementById('btn').onclick = () => explode(!exploded);
+Object.assign(window, { build, highlight, explode });
+
+let yaw = -.55, pitch = .3, dist = 20, autoSpin = true, last = null, pinch = null;
+addEventListener('pointerdown', e => { last = [e.clientX, e.clientY]; autoSpin = false; });
+addEventListener('pointerup', () => last = null);
+addEventListener('pointermove', e => { if (!last || pinch) return; yaw -= (e.clientX - last[0]) * .008; pitch = Math.max(-.2, Math.min(1.1, pitch + (e.clientY - last[1]) * .006)); last = [e.clientX, e.clientY]; });
+addEventListener('touchmove', e => { if (e.touches.length !== 2) { pinch = null; return; } const [a, b] = e.touches;
+  const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); if (pinch) dist = Math.max(9, Math.min(32, dist * pinch / d)); pinch = d; }, { passive: true });
+addEventListener('touchend', () => pinch = null);
+function resize() { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize();
+
+const clock = new THREE.Clock(), tmp = new THREE.Vector3();
+const ease = t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+(function frame() {
+  const dt = Math.min(clock.getDelta(), .05), pulse = .5 + .5 * Math.sin(clock.elapsedTime * 5);
+  explodeT = Math.max(0, Math.min(1, explodeT + (exploded ? dt : -dt) / 1.4)); const e = ease(explodeT);
+  if (autoSpin) yaw += dt * .18;
+  camera.position.set(Math.sin(yaw) * Math.cos(pitch) * dist, Math.sin(pitch) * dist, Math.cos(yaw) * Math.cos(pitch) * dist); camera.lookAt(0, 0, 0);
+  for (const id in parts) {
+    const p = parts[id], m = p.children[0].material, hit = faults.includes(id);
+    p.position.lerpVectors(p.userData.home, p.userData.out, e);
+    if (hit) { m.emissive.setRGB(1, .12, .08); m.emissiveIntensity = .35 + pulse * .9 * e; } else m.emissiveIntensity = 0;
+    tmp.copy(p.position); tmp.y += p.userData.top; tmp.project(camera);
+    p.userData.el.style.left = (tmp.x * .5 + .5) * innerWidth + 'px'; p.userData.el.style.top = (-tmp.y * .5 + .5) * innerHeight + 'px';
+  }
+  renderer.render(scene, camera); requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

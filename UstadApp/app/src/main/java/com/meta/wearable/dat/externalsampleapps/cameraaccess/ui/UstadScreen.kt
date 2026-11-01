@@ -1,0 +1,383 @@
+// UstadScreen - Look → Reveal → Confirm → Fix, driven by a photo from the glasses
+//
+// Shown when a photo is captured from the glasses stream. Faces are blurred on-device first, then
+// Gemini identifies the machine and ranks the hidden failing parts. The exploded view highlights
+// the suspected part, the technician proves it with a quick test, and the repair coach speaks
+// the fix step by step in their language.
+
+package com.meta.wearable.dat.externalsampleapps.cameraaccess.ui
+
+import android.annotation.SuppressLint
+import android.graphics.Bitmap
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ustad.CoachLanguage
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ustad.GeminiClient
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ustad.Inspection
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ustad.KnowledgeBase
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ustad.MachineLibrary
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ustad.PrivacyFilter
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ustad.RepairStep
+import com.meta.wearable.dat.externalsampleapps.cameraaccess.ustad.UstadVoice
+import kotlinx.coroutines.launch
+
+internal val Bg = Color(0xFF070C18)
+internal val CardBg = Color(0xFF0F1A30)
+internal val Hud = Color(0xFF39E6FF)
+internal val Fault = Color(0xFFFF3B30)
+internal val Ok = Color(0xFF34D399)
+internal val Muted = Color(0xFF8AA0C0)
+
+private sealed interface Phase {
+  data object Analyzing : Phase
+  data class Failed(val message: String) : Phase
+  data object Result : Phase
+  data object LoadingSteps : Phase
+  data object Coaching : Phase
+  data object Done : Phase
+}
+
+@Composable
+fun UstadScreen(photo: Bitmap, onDismiss: () -> Unit) {
+  val context = LocalContext.current
+  val scope = rememberCoroutineScope()
+  val client = remember { GeminiClient() }
+  val voice = remember { UstadVoice(context) }
+  val kb = remember { runCatching { KnowledgeBase.load(context, "split_ac") }.getOrNull() }
+  DisposableEffect(Unit) { onDispose { voice.shutdown() } }
+
+  var phase by remember { mutableStateOf<Phase>(Phase.Analyzing) }
+  var safePhoto by remember { mutableStateOf(photo) }
+  var facesBlurred by remember { mutableIntStateOf(0) }
+  var inspection by remember { mutableStateOf<Inspection?>(null) }
+  var dxIndex by remember { mutableIntStateOf(0) }
+  var confirmed by remember { mutableStateOf(false) }
+  var language by remember { mutableStateOf(CoachLanguage.ENGLISH) }
+  var steps by remember { mutableStateOf<List<RepairStep>>(emptyList()) }
+  var stepIndex by remember { mutableIntStateOf(0) }
+  var attempt by remember { mutableIntStateOf(0) }
+  var voiceNote by remember { mutableStateOf("") }
+
+  fun say(text: String) {
+    voiceNote = if (voice.speak(text, language)) "" else "No ${language.promptName} voice installed on this phone"
+  }
+
+  // Privacy first, then diagnosis. Re-runs on Retry.
+  LaunchedEffect(attempt) {
+    phase = Phase.Analyzing
+    val privacy = PrivacyFilter.blurFaces(photo)
+    safePhoto = privacy.image
+    facesBlurred = privacy.facesBlurred
+    runCatching { client.inspect(privacy.image, "", kb?.symptoms?.values.orEmpty()) }
+        .onSuccess {
+          inspection = it
+          dxIndex = 0
+          confirmed = false
+          phase = Phase.Result
+          say(if (it.needBetterView) it.userInstruction else it.voiceSummary)
+        }
+        .onFailure { phase = Phase.Failed(it.message ?: "Diagnosis failed") }
+  }
+
+  Column(
+      Modifier.fillMaxSize()
+          .background(Bg)
+          .statusBarsPadding()
+          .navigationBarsPadding()
+          .verticalScroll(rememberScrollState())
+          .padding(16.dp),
+      verticalArrangement = Arrangement.spacedBy(12.dp),
+  ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text("USTAD", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+      Spacer(Modifier.padding(6.dp))
+      Text("See inside any machine", color = Muted, fontSize = 13.sp)
+      Spacer(Modifier.weight(1f))
+      OutlinedButton(onClick = { voice.stop(); onDismiss() }) { Text("Close", color = Color.White) }
+    }
+
+    Image(
+        safePhoto.asImageBitmap(),
+        contentDescription = "Glasses photo",
+        contentScale = ContentScale.Crop,
+        modifier = Modifier.fillMaxWidth().height(200.dp).clip(RoundedCornerShape(12.dp)),
+    )
+    Text(
+        "🔒 Captured on your command · ${if (facesBlurred > 0) "$facesBlurred face(s) blurred on device" else "no faces in frame"} · photo not stored",
+        color = Ok,
+        fontSize = 12.sp,
+    )
+
+    when (val p = phase) {
+      Phase.Analyzing -> UstadBusy("Ustad is looking and reasoning…")
+      is Phase.Failed ->
+          UstadCard("Couldn't diagnose") {
+            Text(p.message, color = Fault)
+            Text("The free AI service is busy. Wait a few seconds and retry.", color = Muted, fontSize = 13.sp)
+            Button(onClick = { attempt++ }) { Text("Retry") }
+          }
+      else -> {
+        val insp = inspection ?: return@Column
+        if (insp.needBetterView) {
+          UstadCard("Need a better view") { UstadBody(insp.userInstruction) }
+          return@Column
+        }
+        // Machines in Ustad's knowledge base are diagnosed by Ustad's own model, not the AI.
+        if (kb != null && isAirConditioner(insp)) {
+          AcExpertPanel(insp, kb, client, language, onLanguage = { language = it }, say = ::say)
+          if (voiceNote.isNotBlank()) Text(voiceNote, color = Muted, fontSize = 12.sp)
+          return@Column
+        }
+        val dx = insp.diagnoses.getOrNull(dxIndex)
+        if (!insp.faultFound || insp.diagnoses.isEmpty()) {
+          UstadCard("Machine") {
+            Text(listOf(insp.machine.type, insp.machine.brand, insp.machine.model).filter { it.isNotBlank() }.joinToString(" · "),
+                color = Color.White, fontWeight = FontWeight.Bold)
+            Text(client.lastProvider, color = Muted, fontSize = 12.sp)
+          }
+          UstadCard("✅ No fault found") { UstadBody(insp.voiceSummary.ifBlank { "Nothing visible looks wrong. Point Ustad at the symptom, like a leak or burn mark." }) }
+          if (isAirConditioner(insp)) UstadCard("Inside view") { ExplodedView(emptyList()) }
+          return@Column
+        }
+
+        UstadCard("Machine") {
+          Text(listOf(insp.machine.type, insp.machine.brand, insp.machine.model).filter { it.isNotBlank() }.joinToString(" · "),
+              color = Color.White, fontWeight = FontWeight.Bold)
+          Text("Identified with ${(insp.machine.confidence * 100).toInt()}% confidence · ${client.lastProvider}", color = Muted, fontSize = 12.sp)
+        }
+        if (insp.symptoms.isNotEmpty()) {
+          UstadCard("What I see") { insp.symptoms.forEach { UstadBody("• ${it.symptom} — ${it.location}") } }
+        }
+        if (insp.safety.hazard.isNotBlank() || insp.safety.stopAndCallPro) {
+          UstadCard("⚠ Safety", border = Fault) {
+            UstadBody(insp.safety.hazard)
+            if (insp.safety.stopAndCallPro) Text("STOP — call a certified professional.", color = Fault, fontWeight = FontWeight.Bold)
+          }
+        }
+
+        if (dx != null) {
+          UstadCard("Inside view") {
+            if (isAirConditioner(insp)) {
+              ExplodedView(listOfNotNull(libraryPart(dx)))
+            } else {
+              ExplodedView(listOf(dx.partId), partsJson = partsLayout(insp))
+            }
+          }
+          UstadCard("Why it's failing") {
+            dx.causeChain.forEachIndexed { i, step ->
+              Text(step, color = Color.White, modifier = Modifier.fillMaxWidth().background(Color(0xFF11203D), RoundedCornerShape(6.dp)).padding(8.dp))
+              if (i < dx.causeChain.lastIndex) Text("▼", color = Fault, modifier = Modifier.padding(start = 12.dp))
+            }
+          }
+          UstadCard("Diagnosis") {
+            insp.diagnoses.forEachIndexed { i, d ->
+              Row { Text(d.partName, color = if (i == dxIndex) Color.White else Muted, modifier = Modifier.weight(1f)); Text("${(d.confidence * 100).toInt()}%", color = Color.White) }
+              LinearProgressIndicator(progress = { d.confidence.toFloat() }, color = if (i == dxIndex) Fault else Hud, trackColor = Color(0xFF13213D), modifier = Modifier.fillMaxWidth())
+            }
+            Spacer(Modifier.height(4.dp))
+            UstadBody("🧪 Prove it: ${dx.confirmTest}")
+            Text("If true: ${dx.expectedIfTrue}", color = Muted, fontSize = 13.sp)
+            if (!confirmed) {
+              Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { confirmed = true; say("Confirmed. ${dx.partName}.") }, colors = ButtonDefaults.buttonColors(containerColor = Ok)) { Text("Confirmed") }
+                OutlinedButton(
+                    enabled = dxIndex < insp.diagnoses.lastIndex,
+                    onClick = { dxIndex++; insp.diagnoses.getOrNull(dxIndex)?.let { say("Next suspect: ${it.partName}. ${it.confirmTest}") } },
+                ) { Text("Not this — next", color = Color.White) }
+              }
+            } else {
+              Text("CONFIRMED", color = Ok, fontWeight = FontWeight.Black, fontSize = 18.sp)
+            }
+          }
+
+          if (confirmed) {
+            UstadCard("Repair coach") {
+              Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                CoachLanguage.entries.forEach { lang ->
+                  FilterChip(selected = language == lang, onClick = { language = lang }, label = { Text(lang.label) })
+                }
+              }
+              when (phase) {
+                Phase.Result ->
+                    Button(onClick = {
+                      phase = Phase.LoadingSteps
+                      scope.launch {
+                        runCatching { client.repairSteps(insp, dx, language.promptName) }
+                            .onSuccess { steps = it; stepIndex = 0; phase = Phase.Coaching; it.firstOrNull()?.let { s -> say(s.say) } }
+                            .onFailure { phase = Phase.Result; voiceNote = it.message ?: "Couldn't load steps" }
+                      }
+                    }) { Text("Start repair coach") }
+                Phase.LoadingSteps -> UstadBusy("Preparing steps in ${language.promptName}…")
+                Phase.Coaching -> {
+                  val s = steps.getOrNull(stepIndex)
+                  if (s != null) {
+                    Text("Step ${stepIndex + 1} of ${steps.size}", color = Muted, fontSize = 12.sp)
+                    Text(s.say, color = if (s.safetyStop) Fault else Color.White, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    if (s.checkpoint) Text("📸 Checkpoint: photo must show ${s.checkpointMustShow}", color = Color(0xFFFBBF24), fontSize = 13.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      OutlinedButton(enabled = stepIndex > 0, onClick = { stepIndex--; say(steps[stepIndex].say) }) { Text("Back", color = Color.White) }
+                      OutlinedButton(onClick = { say(s.say) }) { Text("Repeat", color = Color.White) }
+                      Button(onClick = {
+                        if (stepIndex < steps.lastIndex) { stepIndex++; say(steps[stepIndex].say) }
+                        else { phase = Phase.Done; say("Repair complete. Report saved.") }
+                      }) { Text(if (stepIndex < steps.lastIndex) "Next" else "Finish") }
+                    }
+                  }
+                }
+                Phase.Done -> {
+                  Text("✅ Fixed: ${dx.partName}", color = Ok, fontWeight = FontWeight.Bold)
+                  UstadBody("Steps completed: ${steps.size} · Cause: ${dx.causeChain.firstOrNull().orEmpty()}")
+                }
+                else -> Unit
+              }
+            }
+          }
+        }
+        if (voiceNote.isNotBlank()) Text(voiceNote, color = Muted, fontSize = 12.sp)
+      }
+    }
+  }
+}
+
+/** The AI's internal-part layout, or a minimal one built from the diagnoses if it sent none. */
+private fun partsLayout(insp: Inspection): String {
+  val raw = runCatching { org.json.JSONArray(insp.internalPartsJson) }.getOrNull()
+  if (raw != null && raw.length() > 0) return raw.toString()
+  val out = org.json.JSONArray()
+  insp.diagnoses.forEachIndexed { i, d ->
+    out.put(org.json.JSONObject().put("id", d.partId).put("name", d.partName).put("shape", "box")
+        .put("size", org.json.JSONArray(listOf(2.4, 1.0, 1.0))).put("layer", 2 - i * 2).put("color", "#8a96a3"))
+  }
+  out.put(org.json.JSONObject().put("id", "housing").put("name", insp.machine.type.ifBlank { "Housing" }).put("shape", "box")
+      .put("size", org.json.JSONArray(listOf(4.0, 2.0, 2.0))).put("layer", 0).put("color", "#5b6475"))
+  return out.toString()
+}
+
+/** True for any air-conditioner the AI names, even if it used its own part ids. */
+private fun isAirConditioner(insp: Inspection): Boolean {
+  val type = "${insp.machine.type} ${insp.machine.model}".lowercase()
+  return insp.diagnoses.any { it.partId in MachineLibrary.acParts } ||
+      listOf("air con", "air-con", "aircon", "conditioner", "split", "a/c", "hvac", "ac unit", "indoor unit").any { it in type } ||
+      Regex("""ac""").containsMatchIn(type)
+}
+
+/** Maps the AI's part to a part of the 3D AC model by id or by keywords in its name. */
+private fun libraryPart(dx: com.meta.wearable.dat.externalsampleapps.cameraaccess.ustad.Diagnosis): String? {
+  if (dx.partId in MachineLibrary.acParts) return dx.partId
+  val n = "${dx.partId} ${dx.partName}".lowercase()
+  return listOf(
+      "p-pipe" to listOf("pipe", "hose", "line", "outlet"),
+      "p-pan" to listOf("pan", "tray", "drain", "condensate"),
+      "p-filter" to listOf("filter", "dust"),
+      "p-coil" to listOf("coil", "evaporator", "fin", "refrigerant", "copper"),
+      "p-fan" to listOf("fan", "blower", "motor", "bearing"),
+      "p-pcb" to listOf("board", "pcb", "control", "sensor", "electr", "wiring"),
+      "p-louver" to listOf("louver", "louvre", "vane", "flap", "swing"),
+      "p-cover" to listOf("cover", "panel", "casing", "housing"),
+  ).firstOrNull { (_, words) -> words.any { it in n } }?.first
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+internal fun ExplodedView(partIds: List<String>, partsJson: String? = null) {
+  // AC uses the hand-built 3D model; any other machine is drawn from the AI's part layout.
+  val page = if (partsJson == null) "split_ac_indoor.html" else "generic.html"
+  val ids = partIds.joinToString(",", "[", "]") { org.json.JSONObject.quote(it) }
+  val js = (if (partsJson == null) "" else "build($partsJson); ") + "highlight($ids); explode(true);"
+  AndroidView(
+      factory = { ctx ->
+        WebView(ctx).apply {
+          settings.javaScriptEnabled = true
+          setBackgroundColor(android.graphics.Color.rgb(7, 12, 24))
+          webChromeClient = object : android.webkit.WebChromeClient() {
+            override fun onConsoleMessage(m: android.webkit.ConsoleMessage): Boolean {
+              android.util.Log.d("Ustad3D", "${m.message()} (${m.sourceId()}:${m.lineNumber()})"); return true
+            }
+          }
+          // Only run JS once the page is loaded; until then just remember the latest command.
+          webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView, url: String?) {
+              view.setTag(android.R.id.title, true)
+              (view.tag as? String)?.let { view.evaluateJavascript(it, null) }
+            }
+          }
+          tag = js
+          loadUrl("file:///android_asset/ustad/$page")
+        }
+      },
+      update = { view ->
+        if (view.tag != js) {
+          view.tag = js
+          if (view.getTag(android.R.id.title) == true) view.evaluateJavascript(js, null)
+        }
+      },
+      modifier = Modifier.fillMaxWidth().height(400.dp).clip(RoundedCornerShape(10.dp)),
+  )
+}
+
+@Composable
+internal fun UstadCard(title: String, border: Color = Color(0xFF172A4D), content: @Composable () -> Unit) {
+  Column(
+      Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(12.dp)).padding(14.dp),
+      verticalArrangement = Arrangement.spacedBy(6.dp),
+  ) {
+    Text(title.uppercase(), color = if (border == Fault) Fault else Hud, fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+    content()
+  }
+}
+
+@Composable
+internal fun UstadBody(text: String) = Text(text, color = Color.White, fontSize = 15.sp)
+
+@Composable
+internal fun UstadBusy(text: String) {
+  Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+      CircularProgressIndicator(color = Hud)
+      Text(text, color = Muted)
+    }
+  }
+}

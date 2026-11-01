@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ustad Simulation</title>
+<style>
+  :root {
+    --bg: #05080f; --hud: #39e6ff; --hud-dim: rgba(57,230,255,.35);
+    --red: #ff3b30; --ok: #34d399; --warn: #fbbf24; --text: #e8f1ff; --muted: #8aa0c0;
+    --panel: rgba(8,16,32,.78);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif; overflow: hidden; }
+  .stage { position: fixed; inset: 0; display: grid; grid-template-columns: 1fr 400px; }
+  /* camera view */
+  .view { position: relative; overflow: hidden;
+    background: radial-gradient(ellipse at 50% 30%, #2a2f38 0%, #14171d 60%, #0a0c10 100%); }
+  .view svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .vignette { position: absolute; inset: 0; pointer-events: none;
+    box-shadow: inset 0 0 180px 60px rgba(0,0,0,.85); border-radius: 40px; }
+  .hud-top { position: absolute; top: 22px; left: 28px; right: 28px; display: flex;
+    justify-content: space-between; font-size: 14px; letter-spacing: .12em; color: var(--hud); text-transform: uppercase; }
+  .rec { color: var(--red); } .rec::before { content: "●"; margin-right: 6px; animation: blink 1s infinite; }
+  .caption { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); max-width: 80%;
+    background: var(--panel); border: 1px solid var(--hud-dim); border-radius: 14px; padding: 14px 22px;
+    font-size: 22px; line-height: 1.35; text-align: center; backdrop-filter: blur(6px); }
+  .caption small { display: block; color: var(--hud); font-size: 12px; letter-spacing: .15em; margin-bottom: 4px; }
+  /* side panel */
+  .side { background: #070c18; border-left: 1px solid #13213d; display: flex; flex-direction: column; padding: 22px; gap: 14px; overflow-y: auto; }
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand b { font-size: 30px; letter-spacing: .08em; }
+  .brand span { color: var(--muted); font-size: 13px; }
+  .steps { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+  .steps div { font-size: 10px; text-align: center; padding: 6px 0; border-radius: 6px; background: #0f1a30; color: var(--muted); letter-spacing: .06em; }
+  .steps div.on { background: var(--hud); color: #001018; font-weight: 700; }
+  .steps div.done { background: #12324a; color: var(--hud); }
+  .card { background: #0c1528; border: 1px solid #172a4d; border-radius: 12px; padding: 14px 16px; }
+  .card h3 { margin: 0 0 8px; font-size: 12px; letter-spacing: .14em; color: var(--hud); text-transform: uppercase; }
+  .card p { margin: 4px 0; font-size: 15px; line-height: 1.45; }
+  .chain { display: flex; flex-direction: column; gap: 6px; }
+  .chain div { background: #11203d; border-left: 3px solid var(--red); padding: 7px 10px; border-radius: 6px; font-size: 14px; }
+  .chain .arrow { background: none; border: 0; padding: 0 0 0 12px; color: var(--red); font-size: 14px; }
+  .dx { display: grid; grid-template-columns: 1fr 52px; gap: 6px 10px; align-items: center; font-size: 14px; }
+  .bar { grid-column: 1 / -1; height: 6px; background: #13213d; border-radius: 4px; overflow: hidden; margin-bottom: 6px; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--hud); transition: width 1s ease; }
+  .bar.top i { background: var(--red); }
+  .fix li { margin: 6px 0; font-size: 15px; line-height: 1.4; color: var(--muted); }
+  .fix li.cur { color: var(--text); font-weight: 600; }
+  .fix li.ok { color: var(--ok); }
+  .fix li .cp { color: var(--warn); font-size: 12px; margin-left: 6px; }
+  .stamp { display: inline-block; border: 2px solid var(--ok); color: var(--ok); padding: 4px 12px; border-radius: 8px; font-weight: 800; letter-spacing: .12em; transform: rotate(-4deg); }
+  .controls { margin-top: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+  button, select { font: inherit; font-size: 14px; border-radius: 10px; border: 1px solid #23406f; background: #0f1d38; color: var(--text); padding: 10px 14px; cursor: pointer; }
+  button.primary { background: var(--hud); color: #001018; border-color: var(--hud); font-weight: 700; flex: 1; }
+  button:hover { filter: brightness(1.15); }
+  .hint { color: var(--muted); font-size: 12px; }
+  .hidden { display: none !important; }
+  /* svg animation */
+  .part { transition: transform 1.4s cubic-bezier(.2,.8,.2,1); }
+  .label { opacity: 0; transition: opacity .6s ease .9s; }
+  .exploded .label { opacity: 1; }
+  .fault { animation: none; }
+  .glow .fault { animation: pulse 1.1s ease-in-out infinite; }
+  .scanline { opacity: 0; }
+  .scanning .scanline { opacity: 1; animation: scan 1.6s linear infinite; }
+  .box { opacity: 0; transition: opacity .4s; }
+  .show-boxes .box { opacity: 1; }
+  .wave { opacity: 0; transition: opacity .4s; }
+  .listening .wave { opacity: 1; }
+  .wave rect { animation: eq .5s ease-in-out infinite alternate; transform-origin: center; transform-box: fill-box; }
+  .drop { animation: drip 1.3s ease-in infinite; }
+  .fixed .drop { display: none; }
+  @keyframes drip { 0% { transform: translateY(0); opacity: 0; } 15% { opacity: 1; } 100% { transform: translateY(170px); opacity: 0; } }
+  @keyframes pulse { 0%,100% { filter: drop-shadow(0 0 4px var(--red)); } 50% { filter: drop-shadow(0 0 22px var(--red)) brightness(1.4); } }
+  @keyframes scan { from { transform: translateY(0); } to { transform: translateY(560px); } }
+  @keyframes eq { from { transform: scaleY(.2); } to { transform: scaleY(1); } }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (max-width: 900px) { .stage { grid-template-columns: 1fr; grid-template-rows: 55vh auto; } .side { overflow: visible; } html, body { overflow: auto; } }
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="view" id="view">
+    <svg viewBox="0 0 1000 640" preserveAspectRatio="xMidYMid meet" id="scene">
+      <defs>
+        <linearGradient id="body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f4f6f8"/><stop offset="1" stop-color="#cfd5dc"/></linearGradient>
+        <linearGradient id="fins" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#9aa7b4"/><stop offset=".5" stop-color="#c8d1da"/><stop offset="1" stop-color="#8e9aa6"/></linearGradient>
+        <pattern id="finpat" width="6" height="10" patternUnits="userSpaceOnUse"><rect width="6" height="10" fill="url(#fins)"/><line x1="0" y1="0" x2="0" y2="10" stroke="#6f7c89" stroke-width="1.2"/></pattern>
+        <pattern id="mesh" width="8" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#dfe6ea"/><path d="M0 0L8 8M8 0L0 8" stroke="#aab6bf" stroke-width=".8"/></pattern>
+      </defs>
+      <!-- wall -->
+      <rect width="1000" height="640" fill="#2b2f36"/>
+      <rect y="560" width="1000" height="80" fill="#1d2026"/>
+      <!-- water puddle -->
+      <ellipse cx="690" cy="585" rx="70" ry="9" fill="#5fb3ff" opacity=".35" id="puddle"/>
+
+      <g id="ac">
+        <!-- back chassis (static) -->
+        <g class="part" data-x="0" data-y="0">
+          <rect x="250" y="150" width="500" height="170" rx="18" fill="#c3c9cf"/>
+        </g>
+        <!-- evaporator coil -->
+        <g class="part" id="p-coil" data-x="0" data-y="-60">
+          <rect x="275" y="170" width="450" height="80" rx="6" fill="url(#finpat)"/>
+          <g class="label"><line x1="725" y1="200" x2="820" y2="170" stroke="#39e6ff"/><text x="826" y="168" fill="#39e6ff" font-size="16">Evaporator coil</text></g>
+        </g>
+        <!-- blower fan -->
+        <g class="part" id="p-fan" data-x="0" data-y="70">
+          <rect x="300" y="262" width="400" height="34" rx="17" fill="#3b4652"/>
+          <g stroke="#7b8896" stroke-width="2">
+            <line x1="320" y1="265" x2="320" y2="293"/><line x1="350" y1="265" x2="350" y2="293"/><line x1="380" y1="265" x2="380" y2="293"/><line x1="410" y1="265" x2="410" y2="293"/><line x1="440" y1="265" x2="440" y2="293"/><line x1="470" y1="265" x2="470" y2="293"/><line x1="500" y1="265" x2="500" y2="293"/><line x1="530" y1="265" x2="530" y2="293"/><line x1="560" y1="265" x2="560" y2="293"/><line x1="590" y1="265" x2="590" y2="293"/><line x1="620" y1="265" x2="620" y2="293"/><line x1="650" y1="265" x2="650" y2="293"/><line x1="680" y1="265" x2="680" y2="293"/>
+          </g>
+          <g class="label"><line x1="300" y1="280" x2="200" y2="300" stroke="#39e6ff"/><text x="80" y="306" fill="#39e6ff" font-size="16">Blower fan</text></g>
+        </g>
+        <!-- drain pan (FAULT) -->
+        <g class="part fault" id="p-pan" data-x="0" data-y="175">
+          <path d="M270 300 L730 300 L720 326 L280 326 Z" fill="#8a96a3" stroke="#ff3b30" stroke-width="0"/>
+          <rect x="285" y="303" width="430" height="10" fill="#4aa3ff" opacity=".75"/>
+          <g class="label"><line x1="270" y1="314" x2="190" y2="350" stroke="#ff3b30"/><text x="40" y="356" fill="#ff3b30" font-size="17" font-weight="700">Drain pan: overflowing</text></g>
+        </g>
+        <!-- drain pipe (FAULT) -->
+        <g class="part fault" id="p-pipe" data-x="40" data-y="175">
+          <path d="M715 318 C760 318 765 340 765 380 L765 470" stroke="#d6dbe0" stroke-width="12" fill="none" stroke-linecap="round"/>
+          <circle cx="765" cy="372" r="9" fill="#5b4a2e"/>
+          <g class="label"><line x1="775" y1="372" x2="840" y2="372" stroke="#ff3b30"/><text x="846" y="368" fill="#ff3b30" font-size="17" font-weight="700">Drain line</text><text x="846" y="389" fill="#ff3b30" font-size="15">clogged (dust + algae)</text></g>
+        </g>
+        <!-- filter -->
+        <g class="part" id="p-filter" data-x="0" data-y="-140">
+          <rect x="270" y="160" width="460" height="40" rx="6" fill="url(#mesh)" stroke="#aab6bf"/>
+          <g class="label"><line x1="270" y1="180" x2="190" y2="160" stroke="#39e6ff"/><text x="80" y="160" fill="#39e6ff" font-size="16">Air filter</text></g>
+        </g>
+        <!-- PCB -->
+        <g class="part" id="p-pcb" data-x="230" data-y="-40">
+          <rect x="690" y="175" width="50" height="60" rx="4" fill="#0f6b45"/>
+          <rect x="698" y="185" width="14" height="10" fill="#222"/><rect x="718" y="200" width="14" height="14" fill="#222"/>
+          <g class="label"><text x="930" y="205" fill="#39e6ff" font-size="16" text-anchor="end">Control board</text></g>
+        </g>
+        <!-- front cover -->
+        <g class="part" id="p-cover" data-x="0" data-y="-250">
+          <rect x="250" y="150" width="500" height="150" rx="18" fill="url(#body)"/>
+          <rect x="262" y="160" width="476" height="6" rx="3" fill="#fff" opacity=".6"/>
+          <circle cx="715" cy="270" r="4" fill="#34d399"/>
+          <text x="500" y="240" text-anchor="middle" fill="#9aa4ae" font-size="14" letter-spacing="4">INVERTER</text>
+          <g class="label"><line x1="750" y1="180" x2="830" y2="160" stroke="#39e6ff"/><text x="836" y="140" fill="#39e6ff" font-size="16">Front cover</text></g>
+        </g>
+        <!-- louver -->
+        <g class="part" id="p-louver" data-x="0" data-y="260">
+          <rect x="275" y="300" width="450" height="18" rx="9" fill="#e6eaee"/>
+          <g class="label"><line x1="725" y1="309" x2="820" y2="330" stroke="#39e6ff"/><text x="826" y="336" fill="#39e6ff" font-size="16">Louver</text></g>
+        </g>
+        <!-- nameplate -->
+        <g id="nameplate"><rect x="268" y="276" width="70" height="16" rx="2" fill="#dfe3e7" stroke="#aab"/><text x="303" y="288" font-size="9" text-anchor="middle" fill="#556">1.5T R32</text></g>
+      </g>
+
+      <!-- drips -->
+      <g id="drops" fill="#6fc0ff">
+        <circle class="drop" cx="690" cy="330" r="5"/>
+        <circle class="drop" cx="682" cy="330" r="4" style="animation-delay:.45s"/>
+        <circle class="drop" cx="697" cy="330" r="4.5" style="animation-delay:.9s"/>
+      </g>
+
+      <!-- detection boxes -->
+      <g class="box" id="boxes" font-size="15" font-family="Segoe UI">
+        <rect x="258" y="268" width="90" height="32" fill="none" stroke="#39e6ff" stroke-width="2"/>
+        <rect x="258" y="248" width="230" height="20" fill="#39e6ff"/><text x="264" y="263" fill="#001018" font-weight="700">ID · Split AC 1.5T Inverter</text>
+        <rect x="650" y="322" width="80" height="250" fill="none" stroke="#ff3b30" stroke-width="2" stroke-dasharray="6 4"/>
+        <rect x="650" y="572" width="200" height="22" fill="#ff3b30"/><text x="656" y="588" fill="#fff" font-weight="700">LEAK · water dripping 96%</text>
+      </g>
+
+      <!-- listening waveform -->
+      <g class="wave" id="wave" transform="translate(400 60)">
+        <rect x="0" y="0" width="200" height="56" rx="10" fill="rgba(8,16,32,.8)" stroke="#39e6ff"/>
+        <g fill="#39e6ff">
+          <rect x="16" y="14" width="6" height="28" style="animation-delay:.1s"/><rect x="30" y="14" width="6" height="28" style="animation-delay:.3s"/><rect x="44" y="14" width="6" height="28"/><rect x="58" y="14" width="6" height="28" style="animation-delay:.2s"/><rect x="72" y="14" width="6" height="28" style="animation-delay:.4s"/><rect x="86" y="14" width="6" height="28" style="animation-delay:.15s"/><rect x="100" y="14" width="6" height="28" style="animation-delay:.35s"/><rect x="114" y="14" width="6" height="28" style="animation-delay:.05s"/><rect x="128" y="14" width="6" height="28" style="animation-delay:.25s"/><rect x="142" y="14" width="6" height="28" style="animation-delay:.45s"/><rect x="156" y="14" width="6" height="28" style="animation-delay:.12s"/><rect x="170" y="14" width="6" height="28" style="animation-delay:.32s"/>
+        </g>
+      </g>
+
+      <!-- scan line -->
+      <rect class="scanline" x="0" y="40" width="1000" height="3" fill="#39e6ff" opacity=".7"/>
+    </svg>
+    <div class="vignette"></div>
+    <div class="hud-top"><span>USTAD · Ray-Ban Meta</span><span id="hudStatus">Standby</span><span class="rec" id="rec">LIVE</span></div>
+    <div class="caption" id="caption"><small>USTAD</small><span id="capText">Say “Hey Ustad, inspect.”</span></div>
+  </div>
+
+  <aside class="side">
+    <div class="brand"><b>USTAD</b><span>See inside any machine</span></div>
+    <div class="steps" id="steps"><div>LOOK</div><div>LISTEN</div><div>REVEAL</div><div>CONFIRM</div><div>FIX</div><div>DONE</div></div>
+
+    <div class="card" id="cMachine"><h3>Machine</h3><p id="mText">Waiting for inspection…</p></div>
+    <div class="card hidden" id="cSymptoms"><h3>Symptoms</h3><p>💧 Water dripping from right side of unit</p><p id="sound">🔊 Listening…</p></div>
+    <div class="card hidden" id="cChain"><h3>Why it's leaking</h3>
+      <div class="chain"><div>Dust + algae build up in the drain line</div><div class="arrow">▼</div><div>Condensate water can't drain away</div><div class="arrow">▼</div><div>Drain pan fills and overflows</div><div class="arrow">▼</div><div>Water drips from the indoor unit</div></div>
+    </div>
+    <div class="card hidden" id="cDx"><h3>Diagnosis</h3>
+      <div class="dx">
+        <span>Clogged drain line</span><b id="c1">87%</b><div class="bar top"><i id="b1"></i></div>
+        <span>Dirty filter → coil icing</span><b>9%</b><div class="bar"><i id="b2"></i></div>
+        <span>Unit not level</span><b>4%</b><div class="bar"><i id="b3"></i></div>
+      </div>
+      <p id="test" style="margin-top:8px">🧪 <b>Prove it:</b> pour a cup of water into the drain pan. If it doesn't drain in 10 s, it's the drain line.</p>
+      <p id="confirmed" class="hidden"><span class="stamp">CONFIRMED</span></p>
+    </div>
+    <div class="card hidden" id="cFix"><h3>Repair coach <span id="langName" style="color:#8aa0c0"></span></h3><ol class="fix" id="fixList"></ol></div>
+    <div class="card hidden" id="cDone"><h3>Job report</h3>
+      <p>✅ Fault: clogged drain line (confirmed)</p><p>⏱ Time: 14 min · Parts: none</p><p>🗂 Saved to machine history</p><p>🎓 Added to Ustad Tutor library</p>
+    </div>
+
+    <div class="controls">
+      <button class="primary" id="next">▶ Start inspection</button>
+      <button id="auto">Auto demo</button>
+      <select id="lang" title="Voice language"><option value="en">English</option><option value="hi">हिन्दी</option><option value="ar">العربية</option></select>
+      <button id="voice" title="Speak captions">🔈 Voice off</button>
+      <button id="reset">↺</button>
+      <span class="hint">Space = next · F = full screen</span>
+    </div>
+  </aside>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const view = $('#view'), scene = $('#scene');
+const parts = [...document.querySelectorAll('.part')];
+let step = -1, fixIdx = -1, autoTimer = null, speak = false;
+
+const FIX = {
+  en: [["Switch off the AC at the isolator.", false], ["Open the front cover and remove the filter.", false],
+       ["Place a towel under the drain pan.", false], ["Disconnect the drain hose at the outlet.", true],
+       ["Flush the drain line with a wet-vac or water pump.", false], ["Pour water in the pan: it should drain freely.", true],
+       ["Refit filter and cover, power on and check for drips.", true]],
+  hi: [["आइसोलेटर से AC बंद करें।", false], ["फ्रंट कवर खोलें और फ़िल्टर निकालें।", false],
+       ["ड्रेन पैन के नीचे तौलिया रखें।", false], ["आउटलेट पर ड्रेन होज़ अलग करें।", true],
+       ["वेट-वैक या पंप से ड्रेन लाइन साफ़ करें।", false], ["पैन में पानी डालें: पानी आसानी से निकलना चाहिए।", true],
+       ["फ़िल्टर और कवर लगाएँ, AC चालू करें और टपकना जाँचें।", true]],
+  ar: [["افصل المكيف من مفتاح العزل.", false], ["افتح الغطاء الأمامي وأخرج الفلتر.", false],
+       ["ضع منشفة تحت حوض التصريف.", false], ["افصل خرطوم التصريف من المخرج.", true],
+       ["نظّف خط التصريف بمكنسة رطبة أو مضخة ماء.", false], ["اسكب الماء في الحوض: يجب أن يُصرَّف بسهولة.", true],
+       ["أعد تركيب الفلتر والغطاء، شغّل المكيف وتحقق من التنقيط.", true]]
+};
+const LANGNAME = { en: "· English", hi: "· Hindi", ar: "· Arabic" };
+const VOICE = { en: "en-US", hi: "hi-IN", ar: "ar-SA" };
+
+const STEPS = [
+  { name: "LOOK", status: "Scanning", btn: "Next: Listen",
+    cap: "Identified: Split AC, 1.5 ton inverter. Water leak detected on the right side.",
+    run() { view.classList.add('scanning'); setTimeout(() => { scene.classList.add('show-boxes'); }, 1200);
+      $('#mText').innerHTML = "<b>Split AC · 1.5 ton · Inverter · R32</b><br><span style='color:#8aa0c0'>Read from nameplate</span>";
+      show('#cSymptoms'); } },
+  { name: "LISTEN", status: "Listening", btn: "Next: Reveal inside",
+    cap: "Fan sounds normal. Compressor running. No mechanical fault. The problem is water flow.",
+    run() { view.classList.remove('scanning'); scene.classList.add('listening');
+      setTimeout(() => $('#sound').innerHTML = "🔊 Fan: normal · Compressor: normal", 1500); } },
+  { name: "REVEAL", status: "X-Ray view", btn: "Next: Confirm",
+    cap: "Inside view: the drain line is clogged, so the drain pan overflows. That's your leak.",
+    run() { scene.classList.remove('listening', 'show-boxes'); explode(true);
+      setTimeout(() => scene.classList.add('glow'), 1000); show('#cChain'); } },
+  { name: "CONFIRM", status: "Proving cause", btn: "Water didn't drain ✓",
+    cap: "87% sure it's the drain line. Pour a cup of water into the drain pan to confirm.",
+    run() { show('#cDx'); setTimeout(() => { $('#b1').style.width = '87%'; $('#b2').style.width = '9%'; $('#b3').style.width = '4%'; }, 100); } },
+  { name: "FIX", status: "Repair coach", btn: "Next step",
+    cap: "Confirmed. Let's fix it. Step 1: switch off the AC at the isolator.",
+    run() { $('#confirmed').classList.remove('hidden'); $('#test').style.opacity = .5; explode(false);
+      setTimeout(() => { show('#cFix'); renderFix(); }, 600); } },
+  { name: "DONE", status: "Fixed", btn: "Restart",
+    cap: "Leak fixed. Report saved to the machine history. Great job.",
+    run() { scene.classList.remove('glow'); scene.classList.add('fixed'); $('#puddle').style.opacity = 0; show('#cDone'); } }
+];
+
+function show(sel) { $(sel).classList.remove('hidden'); }
+function explode(on) {
+  scene.classList.toggle('exploded', on);
+  parts.forEach(p => p.style.transform = on ? `translate(${p.dataset.x}px, ${p.dataset.y * 0.55}px)` : '');
+  $('#drops').style.opacity = on ? 0 : 1;
+  $('#nameplate').style.opacity = on ? 0 : 1;
+}
+function caption(t) {
+  $('#capText').textContent = t;
+  if (speak && 'speechSynthesis' in window) {
+    speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(t);
+    u.lang = VOICE[$('#lang').value]; speechSynthesis.speak(u);
+  }
+}
+function renderFix() {
+  const lang = $('#lang').value; $('#langName').textContent = LANGNAME[lang];
+  const list = $('#fixList'); list.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  list.innerHTML = FIX[lang].map(([t, cp], i) =>
+    `<li class="${i < fixIdx ? 'ok' : i === fixIdx ? 'cur' : ''}">${t}${cp ? '<span class="cp">📸 checkpoint</span>' : ''}</li>`).join('');
+}
+function setSteps() {
+  [...$('#steps').children].forEach((d, i) => { d.className = i < step ? 'done' : i === step ? 'on' : ''; });
+}
+function next() {
+  if (step === 4 && fixIdx < FIX.en.length - 1) {
+    fixIdx++; renderFix();
+    const [t, cp] = FIX[$('#lang').value][fixIdx];
+    caption(`Step ${fixIdx + 1}: ${t}` + (cp ? ' 📸 Checkpoint photo OK.' : ''));
+    if (fixIdx === FIX.en.length - 1) $('#next').textContent = 'Finish';
+    return;
+  }
+  if (step === 5) return reset();
+  step++;
+  const s = STEPS[step];
+  $('#hudStatus').textContent = s.status; $('#next').textContent = s.btn;
+  setSteps(); s.run(); caption(s.cap);
+  if (step === 4) fixIdx = 0;
+}
+function reset() {
+  stopAuto(); step = -1; fixIdx = -1;
+  scene.classList.remove('exploded', 'glow', 'fixed', 'listening', 'show-boxes'); view.classList.remove('scanning');
+  explode(false); $('#puddle').style.opacity = .35;
+  ['#cSymptoms', '#cChain', '#cDx', '#cFix', '#cDone'].forEach(s => $(s).classList.add('hidden'));
+  $('#confirmed').classList.add('hidden'); $('#test').style.opacity = 1;
+  ['#b1', '#b2', '#b3'].forEach(s => $(s).style.width = 0);
+  $('#sound').textContent = '🔊 Listening…'; $('#mText').textContent = 'Waiting for inspection…';
+  $('#hudStatus').textContent = 'Standby'; $('#next').textContent = '▶ Start inspection';
+  setSteps(); caption('Say “Hey Ustad, inspect.”');
+}
+function stopAuto() { clearInterval(autoTimer); autoTimer = null; $('#auto').textContent = 'Auto demo'; }
+$('#next').onclick = () => { stopAuto(); next(); };
+$('#reset').onclick = reset;
+$('#auto').onclick = () => {
+  if (autoTimer) return stopAuto();
+  if (step === 5) reset();
+  $('#auto').textContent = '⏸ Pause'; next();
+  autoTimer = setInterval(() => { if (step === 5) return stopAuto(); next(); }, 4200);
+};
+$('#voice').onclick = () => { speak = !speak; $('#voice').textContent = speak ? '🔊 Voice on' : '🔈 Voice off'; if (!speak) speechSynthesis.cancel(); };
+$('#lang').onchange = () => { if (step === 4) renderFix(); };
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); stopAuto(); next(); }
+  if (e.key === 'f' || e.key === 'F') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+});
+reset();
+</script>
+</body>
+</html>
